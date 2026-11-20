@@ -1,0 +1,194 @@
+name: Update Filters
+on: 
+  workflow_dispatch:
+  schedule:
+  - cron: 0 */8 * * *
+
+env:
+  TZ: Asia/Shanghai
+  SINGBOX_VERSION: 1.12.12
+  MIHOMO_VERSION: 1.19.16
+
+jobs:
+  Update_Filters:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v7
+      
+      - name: Checkout domain-list-community
+        uses: actions/checkout@v7
+        with:
+          repository: v2fly/domain-list-community
+          path: domain-list-community
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: domain-list-community/go.mod
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('.github/workflows/update.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y wget gzip
+          sudo timedatectl set-timezone "$TZ"
+          python -m pip install --upgrade pip
+          pip install -U tld IPy dnspython httpx loguru
+
+      - name: Prepare domain inputs
+        run: |
+          mkdir -p .cache/domain .cache/source
+          # 下载 black/china 作为 filter 输入。三级兜底：fork 自身 release（fork 会复制资产/跑 blacklist 后自更新）→ 上游源仓库 release → 空文件（保证流程可继续）
+          curl -fsSL --retry 3 -o .cache/domain/black.txt \
+            "https://github.com/${{ github.repository }}/releases/download/domain/black.txt" \
+            || curl -fsSL --retry 3 -o .cache/domain/black.txt \
+            "https://github.com/217heidai/adblockfilters/releases/download/domain/black.txt" \
+            || : > .cache/domain/black.txt
+          curl -fsSL --retry 3 -o .cache/domain/china.txt \
+            "https://github.com/${{ github.repository }}/releases/download/domain/china.txt" \
+            || curl -fsSL --retry 3 -o .cache/domain/china.txt \
+            "https://github.com/217heidai/adblockfilters/releases/download/domain/china.txt" \
+            || : > .cache/domain/china.txt
+          cp rules/white.txt .cache/domain/ || true
+          cp rules/myblock.txt .cache/source/ || true
+
+      - name: Update Filters
+        id: update
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python adblock.py
+          rm -rf __pycache__
+          rm -rf app/__pycache__
+          echo "message=$(date)" >> $GITHUB_OUTPUT
+
+      - name: Check whitelist regression
+        run: |
+          # 白名单里的域名不应出现在产物中，否则说明生成逻辑改坏了
+          [ -f .cache/out/adblockdns.txt ] || exit 0
+          fail=0
+          while IFS= read -r domain || [ -n "$domain" ]; do
+            domain="${domain%$'\r'}"
+            case "$domain" in \#*|"") continue;; esac
+            if grep -qxF "||${domain}^" .cache/out/adblockdns.txt; then
+              echo "whitelist regression: $domain still in adblockdns.txt"
+              fail=1
+            fi
+          done < rules/white.txt
+          exit $fail
+
+      - name: Write summary
+        if: always()
+        run: |
+          {
+            echo "### 生成结果"
+            echo "- adblockdns.txt: $(test -f .cache/out/adblockdns.txt && wc -l < .cache/out/adblockdns.txt || echo 0) 条"
+            echo "- adblockfilters.txt: $(test -f .cache/out/adblockfilters.txt && wc -l < .cache/out/adblockfilters.txt || echo 0) 条"
+            echo "- 白名单: $(grep -vc '^#\|^$' rules/white.txt 2>/dev/null || echo 0) 条"
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Compile Sing-Box filters
+        run: |
+          wget https://github.com/SagerNet/sing-box/releases/download/v${{env.SINGBOX_VERSION}}/sing-box-${{env.SINGBOX_VERSION}}-linux-amd64.tar.gz
+          tar -zxvf sing-box-${{env.SINGBOX_VERSION}}-linux-amd64.tar.gz
+          chmod +x sing-box-${{env.SINGBOX_VERSION}}-linux-amd64/sing-box
+          ./sing-box-${{env.SINGBOX_VERSION}}-linux-amd64/sing-box rule-set compile --output .cache/out/adblocksingbox.srs     .cache/out/adblocksingbox.json
+          ./sing-box-${{env.SINGBOX_VERSION}}-linux-amd64/sing-box rule-set compile --output .cache/out/adblocksingboxlite.srs .cache/out/adblocksingboxlite.json
+          rm -rf sing-box*
+      
+      - name: Compile mihomo filters
+        run: |
+          wget https://github.com/MetaCubeX/mihomo/releases/download/v${{env.MIHOMO_VERSION}}/mihomo-linux-amd64-v${{env.MIHOMO_VERSION}}.gz
+          gzip -d mihomo-linux-amd64-v${{env.MIHOMO_VERSION}}.gz
+          chmod +x mihomo-linux-amd64-v${{env.MIHOMO_VERSION}}
+          ./mihomo-linux-amd64-v${{env.MIHOMO_VERSION}} convert-ruleset domain yaml .cache/out/adblockmihomo.yaml     .cache/out/adblockmihomo.mrs
+          ./mihomo-linux-amd64-v${{env.MIHOMO_VERSION}} convert-ruleset domain yaml .cache/out/adblockmihomolite.yaml .cache/out/adblockmihomolite.mrs
+          rm -rf mihomo*
+      
+      - name: Compile v2ray/xray filters
+        run: |
+          mkdir -p domain-list-community/adblock
+          cp .cache/out/adblockv2ray.txt domain-list-community/adblock/category-ads-all
+          cd domain-list-community
+          go run ./ --datapath=adblock
+          cd ..
+          cp domain-list-community/dlc.dat .cache/out/adblockv2ray.dat
+          mkdir -p domain-list-community/adblocklite
+          cp .cache/out/adblockv2raylite.txt domain-list-community/adblocklite/category-ads-all
+          cd domain-list-community
+          go run ./ --datapath=adblocklite
+          cd ..
+          cp domain-list-community/dlc.dat .cache/out/adblockv2raylite.dat
+          rm -rf domain-list-community
+      
+      - name: Upload rules to release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: rule
+          files: .cache/out/*
+          overwrite_files: true
+          fail_on_unmatched_files: false
+
+      - name: Upload sources to release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: source
+          files: .cache/source/*
+          overwrite_files: true
+          fail_on_unmatched_files: false
+
+      - name: Upload domain backup
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: domain
+          files: .cache/domain/domain.txt
+          overwrite_files: true
+          fail_on_unmatched_files: false
+
+      - name: Commit Changes
+        uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          commit_message: ${{ steps.update.outputs.message }}
+
+      - name: Publish to dist branch
+        # 必须放在 Commit Changes 之后：孤儿分支切换会清空工作区（含刚生成的 README），
+        # 若放前面，README 更新会丢失。dist 为孤儿分支，每轮 force-push 单提交，不产生历史。
+        run: |
+          cp -r .cache/out /tmp/dist-out
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan dist
+          git rm -rf . || true
+          # git rm 只删已跟踪文件，.gitignore 也被删了，未跟踪的 .cache/ 会留下来并被 git add -A 收入；
+          # clean 掉所有未跟踪文件（runner 用完即弃，此步已是任务最后一步），只留刚拷入的产物
+          git clean -fdx
+          cp /tmp/dist-out/* .
+          git add -A
+          [ -n "$(git status --porcelain)" ] || exit 0
+          git commit -m "Publish rules $(date -u +%Y%m%d%H%M)"
+          git push -f origin dist
+
+  Delete_Workflow_Runs:
+    needs: [ Update_Filters ]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Delete workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          retain_days: 1
+          keep_minimum_runs: 5
