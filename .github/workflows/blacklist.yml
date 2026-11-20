@@ -4,6 +4,9 @@ on:
   schedule:
   - cron: 0 1 * * *
 
+permissions:
+  contents: write
+
 env:
   TZ: Asia/Shanghai
   SMARTDNS_URL: https://github.com/pymumu/smartdns/releases/download/Release46.1/smartdns-x86_64

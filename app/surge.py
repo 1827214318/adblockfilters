@@ -34,7 +34,7 @@ class Surge(APPBase):
                     f.write("#!desc=适用于 Surge 的去广告合并规则，每 8 个小时更新一次。规则源：%s。\n"%(self.sourceRule))
                 f.write("#!homepage=%s\n"%(self.homepage))
                 f.write("#!raw-url=%s/%s\n"%(self.source, os.path.basename(fileName)))
-                f.write("#!tag=AdBlock, 217heidai\n")
+                f.write("#!tag=AdBlock, 1827214318\n")
                 f.write("# Example snippet:\n")
                 f.write("# [Rule]\n")
                 f.write("# DOMAIN-SET,%s/%s,REJECT\n"%(self.source, os.path.basename(fileName)))
